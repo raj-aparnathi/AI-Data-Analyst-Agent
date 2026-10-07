@@ -137,3 +137,124 @@ _OPERATION_LABELS = {
 def _operation_label(op_name: str) -> str:
     """Return a human-friendly label for an operation name."""
     return _OPERATION_LABELS.get(op_name, op_name)
+
+
+# ===========================================================================
+# MEMBER 3 CONTRIBUTION — TRANSFORMATION RESULTS UI
+# ===========================================================================
+
+def display_transformation_results(
+    original_df,
+    transformed_df,
+    report: dict,
+) -> None:
+    """Render the transformation results inside a Streamlit app.
+
+    M2's ``display_cleaning_results`` function is NOT modified.
+    This function adds a separate transformation-results section.
+
+    Args:
+        original_df: The DataFrame before transformation.
+        transformed_df: The DataFrame after transformation.
+        report: The transformation report produced by
+                :func:`operations.transformation.apply_transformation_plan`.
+    """
+    st.header("🔄 Transformation Results")
+
+    # ----- Before / After summary -------------------------------------------
+    col_before, col_after = st.columns(2)
+
+    with col_before:
+        st.subheader("Before Transformation")
+        st.metric("Rows", report.get("rows_before", len(original_df)))
+        st.metric("Columns", len(original_df.columns))
+
+    with col_after:
+        st.subheader("After Transformation")
+        st.metric("Rows", report.get("rows_after", len(transformed_df)))
+        st.metric("Columns", len(transformed_df.columns))
+
+    st.divider()
+
+    # ----- Operations Applied -----------------------------------------------
+    ops_applied = report.get("operations_applied", [])
+    if ops_applied:
+        st.subheader("✅ Operations Applied")
+        for op_name in ops_applied:
+            label = _transformation_label(op_name)
+            st.markdown(f"✓ {label}")
+    else:
+        st.info("No transformation operations were applied.")
+
+    st.divider()
+
+    # ----- Changes summary --------------------------------------------------
+    st.subheader("📊 Changes")
+
+    changes_col1, changes_col2 = st.columns(2)
+
+    with changes_col1:
+        cols_created = report.get("columns_created", [])
+        if cols_created:
+            st.info(
+                "**Columns created:**\n"
+                + "\n".join(f"  - {c}" for c in cols_created)
+            )
+
+        cols_modified = report.get("columns_modified", [])
+        if cols_modified:
+            st.info(
+                "**Columns modified:**\n"
+                + "\n".join(f"  - {c}" for c in cols_modified)
+            )
+
+    with changes_col2:
+        cols_removed = report.get("columns_removed", [])
+        if cols_removed:
+            st.info(
+                "**Columns removed:**\n"
+                + "\n".join(f"  - {c}" for c in cols_removed)
+            )
+
+        errors = report.get("errors", [])
+        if errors:
+            st.warning(
+                "**Errors encountered:**\n"
+                + "\n".join(f"  - {e}" for e in errors)
+            )
+
+    rows_diff = report.get("rows_before", 0) - report.get("rows_after", 0)
+    if rows_diff != 0:
+        st.info(f"**Row count change:** {rows_diff:+d}")
+
+    st.divider()
+
+    # ----- Transformed DataFrame preview ------------------------------------
+    st.subheader("📋 Transformed Data Preview")
+    st.dataframe(transformed_df, use_container_width=True)
+    st.caption(
+        f"Showing {len(transformed_df)} rows × "
+        f"{len(transformed_df.columns)} columns."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Transformation label helper (M3)
+# ---------------------------------------------------------------------------
+
+_TRANSFORMATION_LABELS = {
+    "label_encode": "Label encoded column",
+    "one_hot_encode": "One-Hot encoded column",
+    "min_max_normalize": "Min-Max normalized column",
+    "z_score_normalize": "Z-Score standardized column",
+    "convert_datatype": "Converted column datatype",
+    "rename_column": "Renamed column",
+    "drop_column": "Dropped column",
+    "create_calculated_column": "Created calculated column",
+    "extract_date_part": "Extracted date part",
+}
+
+
+def _transformation_label(op_name: str) -> str:
+    """Return a human-friendly label for a transformation operation name."""
+    return _TRANSFORMATION_LABELS.get(op_name, op_name)

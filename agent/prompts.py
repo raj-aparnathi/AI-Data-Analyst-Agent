@@ -7,6 +7,7 @@ for the AI agent.
 Contributions:
 - Member 1: Dataset understanding & profiling prompts
 - Member 2: AI-driven data cleaning prompts
+- Member 3: Data transformation prompts
 - Member 4: Analysis planning & result explanation prompts
 """
 
@@ -398,6 +399,199 @@ if __name__ == "__main__":
 
 
 # ===========================================================================
+# MEMBER 3 CONTRIBUTION — DATA TRANSFORMATION PROMPTS
+# ===========================================================================
+
+TRANSFORMATION_PLAN_PROMPT = """You are a data transformation planner.
+
+Given:
+1. User request describing transformation operations they want applied.
+2. A dataset profile with column names, types, and row count.
+
+Generate a JSON transformation plan — a single JSON object with one key
+called "operations" whose value is an ordered list of operations.
+
+SUPPORTED OPERATIONS
+--------------------
+
+1. label_encode
+   Required: column (str)
+   Use for: categorical columns only.
+
+2. one_hot_encode
+   Required: column (str)
+   Use for: categorical columns only.
+
+3. min_max_normalize
+   Required: column (str)
+   Use for: numerical columns only.
+
+4. z_score_normalize
+   Required: column (str)
+   Use for: numerical columns only.
+
+5. convert_datatype
+   Required: column (str), dtype (str)
+   Allowed dtype values: int, float, string, bool, datetime
+
+6. rename_column
+   Required: old_name (str), new_name (str)
+
+7. drop_column
+   Required: column (str)
+
+8. create_calculated_column
+   Required: new_column (str), left_column (str), operator (str),
+             right_column (str)
+   Allowed operators: +, -, *, /
+   Use for: numerical columns only.
+   NEVER use eval() or arbitrary Python expressions.
+
+9. extract_date_part
+   Required: column (str), part (str)
+   Allowed part values: year, month, day, dayofweek
+
+STRICT RULES
+------------
+1. Return ONLY valid JSON — no markdown, no explanations, no extra text.
+2. Use EXACT column names from the dataset profile. NEVER invent columns.
+3. Use ONLY the operation types listed above.
+4. For min_max_normalize / z_score_normalize: use only numerical columns.
+5. For label_encode / one_hot_encode: use only categorical columns.
+6. For create_calculated_column: use only +, -, *, / operators.
+7. Do NOT generate Python code or arbitrary expressions.
+8. Do NOT perform data cleaning operations.
+9. Do NOT perform machine-learning operations.
+10. Perform ONLY the transformations explicitly requested by the user.
+11. Validate operation parameters against the dataset profile.
+
+EXAMPLES
+
+User: "Convert gender into one-hot encoding."
+Dataset has column: gender (categorical)
+
+{{
+  "operations": [
+    {{"operation": "one_hot_encode", "column": "gender"}}
+  ]
+}}
+
+User: "Normalize salary using Min-Max."
+Dataset has column: salary (numerical)
+
+{{
+  "operations": [
+    {{"operation": "min_max_normalize", "column": "salary"}}
+  ]
+}}
+
+User: "Standardize age using Z-score."
+Dataset has column: age (numerical)
+
+{{
+  "operations": [
+    {{"operation": "z_score_normalize", "column": "age"}}
+  ]
+}}
+
+User: "Convert date to datetime and extract the year."
+Dataset has column: date (object)
+
+{{
+  "operations": [
+    {{"operation": "convert_datatype", "column": "date", "dtype": "datetime"}},
+    {{"operation": "extract_date_part", "column": "date", "part": "year"}}
+  ]
+}}
+
+User: "Create total_price from quantity and price."
+Dataset has columns: quantity (int), price (float)
+
+{{
+  "operations": [
+    {{
+      "operation": "create_calculated_column",
+      "new_column": "total_price",
+      "left_column": "quantity",
+      "operator": "*",
+      "right_column": "price"
+    }}
+  ]
+}}
+
+YOUR INPUTS
+-----------
+User request:
+{user_request}
+
+Dataset profile:
+{profile}
+
+Return the JSON transformation plan now.
+"""
+
+
+TRANSFORMATION_EXPLANATION_PROMPT = """You are a helpful data-analyst assistant.
+
+The user requested the following data-transformation operations and they have
+been applied successfully.
+
+Transformation report:
+{report}
+
+Provide a short, friendly summary of what was done and how the dataset changed.
+Use bullet points. Keep it under 150 words.
+"""
+
+
+def build_transformation_prompt(user_request: str, df) -> str:
+    """Build the full prompt string for the AI transformation planner.
+
+    Creates a concise dataset profile from *df* and injects it, along
+    with *user_request*, into the TRANSFORMATION_PLAN_PROMPT template.
+
+    Args:
+        user_request: Natural-language transformation instruction.
+        df: The DataFrame to be transformed (pandas DataFrame).
+
+    Returns:
+        Ready-to-send prompt string.
+    """
+    profile = _build_transformation_profile(df)
+    return TRANSFORMATION_PLAN_PROMPT.format(
+        user_request=user_request,
+        profile=profile,
+    )
+
+
+def _build_transformation_profile(df) -> str:
+    """Build a human-readable dataset profile for the transformation prompt."""
+    import pandas as pd
+
+    lines = []
+    lines.append(f"Rows: {len(df)}")
+    lines.append(f"Columns: {len(df.columns)}")
+    lines.append("")
+    lines.append("Column details:")
+
+    for col in df.columns:
+        dtype = str(df[col].dtype)
+        missing = int(df[col].isnull().sum())
+        unique = int(df[col].nunique())
+        is_numeric = pd.api.types.is_numeric_dtype(df[col])
+        is_datetime = pd.api.types.is_datetime64_any_dtype(df[col])
+        col_type = "numerical" if is_numeric else (
+            "datetime" if is_datetime else "categorical"
+        )
+        lines.append(
+            f"  - {col}: type={dtype}, classification={col_type}, "
+            f"missing={missing}, unique={unique}"
+        )
+
+    return "\n".join(lines)
+
+
+# ===========================================================================
 # MEMBER 4 CONTRIBUTION — ANALYSIS & VISUALIZATION PROMPTS
 # ===========================================================================
 
@@ -483,3 +677,4 @@ Rules:
 6. Use simple language.
 7. If the result is empty, clearly say that no matching data was found.
 """
+

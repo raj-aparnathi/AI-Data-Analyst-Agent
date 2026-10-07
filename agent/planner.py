@@ -3,6 +3,7 @@ AI Planner Module
 
 Contributions:
 - M2: Cleaning-plan logic (build, parse, validate cleaning plans)
+- M3: Transformation-plan logic (build, parse, validate transformation plans)
 - M4: Analysis-plan logic (convert questions to structured analysis plans)
 
 Provides helpers that:
@@ -405,7 +406,279 @@ def _build_dataset_profile(df: pd.DataFrame) -> str:
 
 
 # ===========================================================================
-# M4 CONTRIBUTION — ANALYSIS PLAN LOGIC
+# MEMBER 3 CONTRIBUTION — TRANSFORMATION PLAN GENERATION
+# ===========================================================================
+
+import json as _json_m3
+import re as _re_m3
+from typing import Optional as _Optional_m3
+
+
+def build_transformation_prompt_m3(
+    user_request: str,
+    df,
+) -> str:
+    """Build the prompt for the AI transformation planner (M3).
+
+    Args:
+        user_request: Natural-language transformation instruction.
+        df: The DataFrame to be transformed.
+
+    Returns:
+        Ready-to-send prompt string.
+    """
+    from agent.prompts import build_transformation_prompt
+    return build_transformation_prompt(user_request, df)
+
+
+def parse_transformation_response(raw_response: str) -> dict:
+    """Extract a JSON transformation plan from the raw AI response.
+
+    Handles markdown code fences and stray surrounding text.
+
+    Args:
+        raw_response: Raw text returned by the AI model.
+
+    Returns:
+        Parsed transformation plan dictionary.
+
+    Raises:
+        ValueError: If the response is not valid JSON or lacks the
+                    expected structure.
+    """
+    cleaned = raw_response.strip()
+
+    fence_pattern = r"```(?:json)?\s*([\s\S]*?)\s*```"
+    fence_match = _re_m3.search(fence_pattern, cleaned)
+    if fence_match:
+        cleaned = fence_match.group(1).strip()
+
+    if not cleaned.startswith("{"):
+        brace_start = cleaned.find("{")
+        if brace_start == -1:
+            raise ValueError("AI response does not contain a JSON object.")
+        cleaned = cleaned[brace_start:]
+
+    brace_end = cleaned.rfind("}")
+    if brace_end == -1:
+        raise ValueError("AI response contains an incomplete JSON object.")
+    cleaned = cleaned[: brace_end + 1]
+
+    try:
+        plan = _json_m3.loads(cleaned)
+    except _json_m3.JSONDecodeError as exc:
+        raise ValueError(f"AI response is not valid JSON: {exc}") from exc
+
+    if not isinstance(plan, dict):
+        raise ValueError("Parsed JSON is not a dictionary.")
+    if "operations" not in plan:
+        raise ValueError("Parsed JSON does not contain an 'operations' key.")
+
+    return plan
+
+
+def _find_column(clause_lower: str, cols_lower_map: dict) -> _Optional_m3[str]:
+    """Return the real column name whose lower-case form appears in clause."""
+    for col_l, original in cols_lower_map.items():
+        if _re_m3.search(rf"\b{_re_m3.escape(col_l)}\b", clause_lower):
+            return original
+    return None
+
+
+def parse_transformation_request_rule_based(
+    user_request: str,
+    df,
+) -> _Optional_m3[dict]:
+    """Parse common natural-language transformation instructions directly.
+
+    Covers requests such as:
+    - "Convert gender to one-hot encoding."
+    - "Label encode the city column."
+    - "Normalize salary using Min-Max."
+    - "Standardize age using Z-score."
+    - "Convert age to integer."
+    - "Rename salary to annual_salary."
+    - "Drop the customer_id column."
+    - "Create total_price from quantity and price."
+    - "Extract year from purchase_date."
+
+    Args:
+        user_request: Natural-language request text.
+        df: Input DataFrame to match column names against.
+
+    Returns:
+        Structured plan dict with 'operations' list, or None if no
+        recognized operations were identified.
+    """
+    import pandas as pd
+
+    operations = []
+    clauses = _re_m3.split(
+        r"\s*(?:;|\band\b|\bthen\b|,|\n)\s*",
+        user_request,
+        flags=_re_m3.IGNORECASE,
+    )
+    clauses = [c.strip() for c in clauses if c.strip()]
+    cols_lower_map = {col.lower(): col for col in df.columns}
+
+    for clause in clauses:
+        c = clause.lower()
+
+        # one_hot_encode
+        if _re_m3.search(
+            r"\b(one.?hot|dummy|dummies|get.?dummies)\b", c
+        ):
+            matched = _find_column(c, cols_lower_map)
+            if matched:
+                operations.append({
+                    "operation": "one_hot_encode",
+                    "column": matched,
+                })
+            continue
+
+        # label_encode
+        if _re_m3.search(r"\blabel.?encod", c):
+            matched = _find_column(c, cols_lower_map)
+            if matched:
+                operations.append({
+                    "operation": "label_encode",
+                    "column": matched,
+                })
+            continue
+
+        # min_max_normalize
+        if _re_m3.search(r"\b(min.?max|minmax)\b", c):
+            matched = _find_column(c, cols_lower_map)
+            if matched:
+                operations.append({
+                    "operation": "min_max_normalize",
+                    "column": matched,
+                })
+            continue
+
+        # z_score_normalize
+        if _re_m3.search(r"\b(z.?score|standardize|zscore)\b", c):
+            matched = _find_column(c, cols_lower_map)
+            if matched:
+                operations.append({
+                    "operation": "z_score_normalize",
+                    "column": matched,
+                })
+            continue
+
+        # drop_column
+        if _re_m3.search(
+            r"\b(drop|remove|delete)\s+(?:the\s+)?([a-z0-9_]+)\s+column\b"
+            r"|\b(drop|remove|delete)\s+column\s+([a-z0-9_]+)\b",
+            c,
+        ):
+            matched = _find_column(c, cols_lower_map)
+            if matched:
+                operations.append({
+                    "operation": "drop_column",
+                    "column": matched,
+                })
+            continue
+
+        # rename_column: "rename X to Y" or "rename X as Y"
+        rename_match = _re_m3.search(
+            r"\brename\s+([a-z0-9_]+)\s+(?:to|as)\s+([a-z0-9_]+)\b", c
+        )
+        if rename_match:
+            old_l, new_l = rename_match.group(1), rename_match.group(2)
+            old_real = cols_lower_map.get(old_l, old_l)
+            operations.append({
+                "operation": "rename_column",
+                "old_name": old_real,
+                "new_name": new_l,
+            })
+            continue
+
+        # convert_datatype: "convert X to int/float/datetime/..."
+        dtype_match = _re_m3.search(
+            r"\bconvert\s+([a-z0-9_]+)\s+to\s+(int|float|string|bool|datetime)\b",
+            c,
+        )
+        if dtype_match:
+            col_l, dtype_str = dtype_match.group(1), dtype_match.group(2)
+            real_col = cols_lower_map.get(col_l, col_l)
+            operations.append({
+                "operation": "convert_datatype",
+                "column": real_col,
+                "dtype": dtype_str,
+            })
+            continue
+
+        # extract_date_part: "extract year/month/day/dayofweek from X"
+        date_match = _re_m3.search(
+            r"\bextract\s+(year|month|day|dayofweek)\s+from\s+([a-z0-9_]+)\b",
+            c,
+        )
+        if date_match:
+            part, col_l = date_match.group(1), date_match.group(2)
+            real_col = cols_lower_map.get(col_l, col_l)
+            operations.append({
+                "operation": "extract_date_part",
+                "column": real_col,
+                "part": part,
+            })
+            continue
+
+    if operations:
+        return {"operations": operations}
+    return None
+
+
+def generate_transformation_plan(
+    user_request: str,
+    df,
+    ai_response: _Optional_m3[str] = None,
+) -> dict:
+    """End-to-end transformation-plan generation (M3).
+
+    If *ai_response* is provided it is parsed and validated directly.
+    Otherwise, rule-based parsing is attempted first; if that yields
+    operations the validated plan is returned.  If rule-based parsing
+    finds nothing, a prompt dict is returned so the caller can query
+    the AI model.
+
+    Args:
+        user_request: Natural-language transformation request.
+        df: The DataFrame to transform.
+        ai_response: Optional raw AI model output to parse.
+
+    Returns:
+        Validated transformation plan dict  OR
+        ``{"prompt": ..., "status": "awaiting_ai_response"}`` if the AI
+        needs to be called.
+
+    Raises:
+        ValueError: If the plan fails validation.
+    """
+    from operations.transformation import validate_transformation_plan
+
+    if ai_response is not None:
+        plan = parse_transformation_response(ai_response)
+    else:
+        rule_plan = parse_transformation_request_rule_based(user_request, df)
+        if rule_plan and rule_plan.get("operations"):
+            plan = rule_plan
+        else:
+            prompt = build_transformation_prompt_m3(user_request, df)
+            return {"prompt": prompt, "status": "awaiting_ai_response"}
+
+    errors = validate_transformation_plan(plan, df)
+    if errors:
+        raise ValueError(
+            "Transformation plan failed validation:\n"
+            + "\n".join(f"  * {e}" for e in errors)
+        )
+
+    return plan
+
+
+# ===========================================================================
+# MEMBER 4 CONTRIBUTION — ANALYSIS PLAN LOGIC
 # ===========================================================================
 
 from agent.prompts import ANALYSIS_PLAN_PROMPT
@@ -530,20 +803,18 @@ def parse_analysis_request_rule_based(
     q_lower = user_question.lower().strip()
     cols_lower_map = {col.lower(): col for col in df.columns}
 
-    def _find_column(text: str) -> Optional[str]:
+    def _find_col(text: str) -> Optional[str]:
         """Find a column name mentioned in text."""
-        # Try exact match first (longest match wins)
         matches = []
         for col_l, original in cols_lower_map.items():
             if col_l in text:
                 matches.append((col_l, original))
         if matches:
-            # Return the longest match to handle multi-word columns
             matches.sort(key=lambda x: len(x[0]), reverse=True)
             return matches[0][1]
         return None
 
-    def _find_two_columns(text: str) -> Optional[List[str]]:
+    def _find_two_cols(text: str) -> Optional[List[str]]:
         """Find two column names in text."""
         found = []
         for col_l, original in cols_lower_map.items():
@@ -553,13 +824,11 @@ def parse_analysis_request_rule_based(
 
     # 1. Average / Mean
     if re.search(r"\b(average|mean)\b", q_lower):
-        # Check for "by" pattern → groupby
         by_match = re.search(r"\bby\s+(.+)", q_lower)
         if by_match:
-            group_col = _find_column(by_match.group(1))
-            # Find value column in the part before "by"
+            group_col = _find_col(by_match.group(1))
             before_by = q_lower.split(" by ")[0]
-            value_col = _find_column(before_by)
+            value_col = _find_col(before_by)
             if group_col and value_col:
                 return {
                     "operation": "groupby",
@@ -569,117 +838,134 @@ def parse_analysis_request_rule_based(
                     "visualization": "bar",
                 }
         else:
-            col = _find_column(q_lower)
+            col = _find_col(q_lower)
             if col:
                 return {"operation": "mean", "column": col}
 
     # 2. Median
     if re.search(r"\bmedian\b", q_lower):
-        col = _find_column(q_lower)
+        col = _find_col(q_lower)
         if col:
             return {"operation": "median", "column": col}
 
     # 3. Mode
-    if re.search(r"\bmode\b|\bmost\s+(frequent|common)\b", q_lower):
-        col = _find_column(q_lower)
+    if re.search(r"\bmode\b", q_lower):
+        col = _find_col(q_lower)
         if col:
             return {"operation": "mode", "column": col}
 
-    # 4. Top-N
-    top_match = re.search(r"\btop\s+(\d+)\b", q_lower)
-    if top_match:
-        n = int(top_match.group(1))
-        col = _find_column(q_lower)
-        if col:
-            return {
-                "operation": "top_n",
-                "column": col,
-                "n": n,
-                "ascending": False,
-                "visualization": "bar",
-            }
-
-    # 5. Correlation
-    if re.search(r"\bcorrelat", q_lower):
-        cols = _find_two_columns(q_lower)
-        plan = {"operation": "correlation"}
-        if cols:
-            plan["columns"] = cols
-        plan["visualization"] = "heatmap"
-        return plan
-
-    # 6. Highest / Lowest / Maximum / Minimum with groupby
-    if re.search(r"\b(highest|most|largest|greatest|maximum)\b", q_lower):
-        # Check for groupby pattern
-        col = _find_column(q_lower)
-        if col:
-            # Look for another column that could be the group
-            other_cols = [
-                orig for cl, orig in cols_lower_map.items()
-                if cl in q_lower and orig != col
-            ]
-            if other_cols:
+    # 4. Min / Lowest / Smallest
+    if re.search(r"\b(minimum|lowest|smallest)\b", q_lower):
+        by_match = re.search(r"\bby\s+(.+)", q_lower)
+        if by_match:
+            group_col = _find_col(by_match.group(1))
+            before_by = q_lower.split(" by ")[0]
+            value_col = _find_col(before_by)
+            if group_col and value_col:
                 return {
                     "operation": "groupby",
-                    "group_column": other_cols[0],
-                    "value_column": col,
+                    "group_column": group_col,
+                    "value_column": value_col,
+                    "aggregation": "min",
+                    "sort": "ascending",
+                    "limit": 1,
+                    "visualization": "bar",
+                }
+        else:
+            col = _find_col(q_lower)
+            if col:
+                return {"operation": "min", "column": col}
+
+    # 5. Max / Highest / Top
+    if re.search(r"\b(maximum|highest|most)\b", q_lower):
+        which_match = re.search(r"\bwhich\s+([a-z0-9_]+)", q_lower)
+        has_match = re.search(r"\b(has|with|had|generated?)\s+(?:the\s+)?(highest|most|maximum)\s+([a-z0-9_]+)", q_lower)
+        if which_match and has_match:
+            group_candidate = which_match.group(1)
+            value_candidate = has_match.group(3)
+            group_col = _find_col(group_candidate)
+            value_col = _find_col(value_candidate)
+            if group_col and value_col:
+                return {
+                    "operation": "groupby",
+                    "group_column": group_col,
+                    "value_column": value_col,
                     "aggregation": "sum",
                     "sort": "descending",
                     "limit": 1,
                     "visualization": "bar",
                 }
-            else:
-                return {"operation": "max", "column": col}
 
-    if re.search(r"\b(lowest|least|smallest|minimum)\b", q_lower):
-        col = _find_column(q_lower)
-        if col:
-            other_cols = [
-                orig for cl, orig in cols_lower_map.items()
-                if cl in q_lower and orig != col
-            ]
-            if other_cols:
+        by_match = re.search(r"\bby\s+(.+)", q_lower)
+        if by_match:
+            group_col = _find_col(by_match.group(1))
+            before_by = q_lower.split(" by ")[0]
+            value_col = _find_col(before_by)
+            if group_col and value_col:
                 return {
                     "operation": "groupby",
-                    "group_column": other_cols[0],
-                    "value_column": col,
-                    "aggregation": "sum",
-                    "sort": "ascending",
+                    "group_column": group_col,
+                    "value_column": value_col,
+                    "aggregation": "max",
+                    "sort": "descending",
                     "limit": 1,
                     "visualization": "bar",
                 }
-            else:
-                return {"operation": "min", "column": col}
+        else:
+            col = _find_col(q_lower)
+            if col:
+                return {"operation": "max", "column": col}
 
-    # 7. Count
-    if re.search(r"\b(count|how\s+many)\b", q_lower):
-        col = _find_column(q_lower)
-        if col:
-            return {"operation": "count", "column": col}
+    # 6. Top N
+    top_n_match = re.search(r"\btop\s+(\d+)\s+([a-z0-9_]+)?(?:\s+by\s+([a-z0-9_]+))?", q_lower)
+    if top_n_match:
+        n = int(top_n_match.group(1))
+        col1 = _find_col(top_n_match.group(2) or "")
+        col2 = _find_col(top_n_match.group(3) or "")
+        val_col = col2 or col1 or _find_col(q_lower)
+        if val_col:
+            return {
+                "operation": "top_n",
+                "column": val_col,
+                "n": n,
+                "ascending": False,
+                "visualization": "bar",
+            }
+
+    # 7. Correlation
+    if re.search(r"\bcorrelat", q_lower):
+        two_cols = _find_two_cols(q_lower)
+        if two_cols:
+            return {
+                "operation": "correlation",
+                "columns": two_cols,
+                "visualization": "heatmap",
+            }
+        return {
+            "operation": "correlation",
+            "visualization": "heatmap",
+        }
 
     # 8. Filter
     filter_match = re.search(
-        r"where\s+(\w+)\s*(>|<|>=|<=|==|!=)\s*([\d.]+)",
+        r"\b(?:where|with|having)\s+([a-z0-9_]+)\s*(>|<|>=|<=|==|!=)\s*([0-9]+(?:\.[0-9]+)?)\b",
         q_lower,
     )
     if filter_match:
-        col_name = filter_match.group(1)
-        matched_col = cols_lower_map.get(col_name)
-        if matched_col:
-            try:
-                value = float(filter_match.group(3))
-            except ValueError:
-                value = filter_match.group(3)
+        col_cand, op, val_str = filter_match.groups()
+        col = _find_col(col_cand)
+        if col:
+            val = float(val_str) if "." in val_str else int(val_str)
             return {
                 "operation": "filter",
-                "column": matched_col,
-                "operator": filter_match.group(2),
-                "value": value,
+                "column": col,
+                "operator": op,
+                "value": val,
             }
 
     # 9. Sort
     if re.search(r"\bsort\b", q_lower):
-        col = _find_column(q_lower)
+        col = _find_col(q_lower)
         if col:
             ascending = "descending" not in q_lower
             return {
@@ -690,7 +976,6 @@ def parse_analysis_request_rule_based(
 
     # 10. Trend
     if re.search(r"\btrend\b|\bover\s+time\b|\bchange\b|\bgrowth\b", q_lower):
-        # Try to find date and value columns
         date_cols = []
         for col in df.columns:
             if pd.api.types.is_datetime64_any_dtype(df[col]):
@@ -702,7 +987,7 @@ def parse_analysis_request_rule_based(
                 except Exception:
                     pass
 
-        value_col = _find_column(q_lower)
+        value_col = _find_col(q_lower)
         if date_cols and value_col:
             return {
                 "operation": "trend",
@@ -727,7 +1012,7 @@ def generate_analysis_plan(
     """End-to-end analysis-plan generation.
 
     If *ai_response* is provided, it is parsed directly.
-    Otherwise, rule-based parsing is attempted first.  If no rule-based
+    Otherwise, rule-based parsing is attempted first. If no rule-based
     match is found, the prompt is returned so an external AI model
     can be queried.
 
