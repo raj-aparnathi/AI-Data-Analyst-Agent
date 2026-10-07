@@ -1,16 +1,19 @@
 """
-AI Planner Module (M2 Contribution — Cleaning-Plan Logic)
+AI Planner Module
+
+Contributions:
+- M2: Cleaning-plan logic (build, parse, validate cleaning plans)
+- M4: Analysis-plan logic (convert questions to structured analysis plans)
 
 Provides helpers that:
 1. Build the prompt for the AI model.
-2. Parse and validate the raw AI response into a cleaning plan.
-3. Identify common natural-language cleaning instructions directly
+2. Parse and validate the raw AI response into a cleaning/analysis plan.
+3. Identify common natural-language instructions directly
    via rule-based parsing.
-4. Offer a high-level *generate_cleaning_plan* function that ties
-   everything together.
+4. Offer high-level plan generation functions.
 
 This module does NOT execute any Pandas operations — it only produces
-the structured JSON plan that *operations/cleaning.py* will execute.
+the structured JSON plans.
 """
 
 import json
@@ -399,3 +402,379 @@ def _build_dataset_profile(df: pd.DataFrame) -> str:
     lines.append(f"Duplicate rows: {total_duplicates}")
 
     return "\n".join(lines)
+
+
+# ===========================================================================
+# M4 CONTRIBUTION — ANALYSIS PLAN LOGIC
+# ===========================================================================
+
+from agent.prompts import ANALYSIS_PLAN_PROMPT
+from operations.analysis import SUPPORTED_ANALYSIS_OPERATIONS, SUPPORTED_AGGREGATIONS
+
+
+# ---------------------------------------------------------------------------
+# Analysis prompt builder
+# ---------------------------------------------------------------------------
+
+def build_analysis_prompt(
+    user_question: str,
+    df: pd.DataFrame,
+) -> str:
+    """Build the full prompt string for the AI model to generate an analysis plan.
+
+    Creates a concise dataset profile from *df* and injects it, along
+    with the *user_question*, into the ``ANALYSIS_PLAN_PROMPT`` template.
+
+    Args:
+        user_question: Natural-language analysis question from the user.
+        df: The DataFrame to analyse.
+
+    Returns:
+        Ready-to-send prompt string.
+    """
+    profile = _build_dataset_profile(df)
+    return ANALYSIS_PLAN_PROMPT.format(
+        user_question=user_question,
+        profile=profile,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Analysis response parser
+# ---------------------------------------------------------------------------
+
+def parse_analysis_response(raw_response: str) -> Dict[str, Any]:
+    """Extract a JSON analysis plan from the raw AI response.
+
+    Handles common issues such as markdown code fences wrapping the
+    JSON and stray text before/after the JSON block.
+
+    Args:
+        raw_response: Raw text returned by the AI model.
+
+    Returns:
+        Parsed analysis plan dictionary.
+
+    Raises:
+        ValueError: If the response does not contain valid JSON or
+                    the JSON does not have the expected structure.
+    """
+    cleaned = raw_response.strip()
+
+    # Strip markdown code fences (```json ... ``` or ``` ... ```)
+    fence_pattern = r"```(?:json)?\s*([\s\S]*?)\s*```"
+    fence_match = re.search(fence_pattern, cleaned)
+    if fence_match:
+        cleaned = fence_match.group(1).strip()
+
+    # Try to locate a JSON object if there's surrounding text
+    if not cleaned.startswith("{"):
+        brace_start = cleaned.find("{")
+        if brace_start == -1:
+            raise ValueError(
+                "AI response does not contain a JSON object; not valid JSON."
+            )
+        cleaned = cleaned[brace_start:]
+
+    # Find the matching closing brace
+    brace_end = cleaned.rfind("}")
+    if brace_end == -1:
+        raise ValueError(
+            "AI response contains an incomplete JSON object; not valid JSON."
+        )
+    cleaned = cleaned[: brace_end + 1]
+
+    try:
+        plan = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"AI response is not valid JSON: {exc}"
+        ) from exc
+
+    if not isinstance(plan, dict):
+        raise ValueError("Parsed JSON is not a dictionary.")
+
+    if "operation" not in plan:
+        raise ValueError(
+            "Parsed JSON does not contain an 'operation' key."
+        )
+
+    return plan
+
+
+# ---------------------------------------------------------------------------
+# Rule-based analysis request parser
+# ---------------------------------------------------------------------------
+
+def parse_analysis_request_rule_based(
+    user_question: str,
+    df: pd.DataFrame,
+) -> Optional[Dict[str, Any]]:
+    """Parse common natural-language analysis questions directly.
+
+    Identifies patterns such as:
+    - "What is the average salary?"
+    - "Which product has the highest sales?"
+    - "Show top 5 products by revenue"
+    - "Is salary correlated with experience?"
+    - "Show products where sales > 100000"
+
+    Args:
+        user_question: Natural-language question text.
+        df: Input DataFrame to match column names against.
+
+    Returns:
+        Structured analysis plan dictionary, or None if no
+        recognized pattern was identified.
+    """
+    q_lower = user_question.lower().strip()
+    cols_lower_map = {col.lower(): col for col in df.columns}
+
+    def _find_column(text: str) -> Optional[str]:
+        """Find a column name mentioned in text."""
+        # Try exact match first (longest match wins)
+        matches = []
+        for col_l, original in cols_lower_map.items():
+            if col_l in text:
+                matches.append((col_l, original))
+        if matches:
+            # Return the longest match to handle multi-word columns
+            matches.sort(key=lambda x: len(x[0]), reverse=True)
+            return matches[0][1]
+        return None
+
+    def _find_two_columns(text: str) -> Optional[List[str]]:
+        """Find two column names in text."""
+        found = []
+        for col_l, original in cols_lower_map.items():
+            if col_l in text and original not in found:
+                found.append(original)
+        return found if len(found) >= 2 else None
+
+    # 1. Average / Mean
+    if re.search(r"\b(average|mean)\b", q_lower):
+        # Check for "by" pattern → groupby
+        by_match = re.search(r"\bby\s+(.+)", q_lower)
+        if by_match:
+            group_col = _find_column(by_match.group(1))
+            # Find value column in the part before "by"
+            before_by = q_lower.split(" by ")[0]
+            value_col = _find_column(before_by)
+            if group_col and value_col:
+                return {
+                    "operation": "groupby",
+                    "group_column": group_col,
+                    "value_column": value_col,
+                    "aggregation": "mean",
+                    "visualization": "bar",
+                }
+        else:
+            col = _find_column(q_lower)
+            if col:
+                return {"operation": "mean", "column": col}
+
+    # 2. Median
+    if re.search(r"\bmedian\b", q_lower):
+        col = _find_column(q_lower)
+        if col:
+            return {"operation": "median", "column": col}
+
+    # 3. Mode
+    if re.search(r"\bmode\b|\bmost\s+(frequent|common)\b", q_lower):
+        col = _find_column(q_lower)
+        if col:
+            return {"operation": "mode", "column": col}
+
+    # 4. Top-N
+    top_match = re.search(r"\btop\s+(\d+)\b", q_lower)
+    if top_match:
+        n = int(top_match.group(1))
+        col = _find_column(q_lower)
+        if col:
+            return {
+                "operation": "top_n",
+                "column": col,
+                "n": n,
+                "ascending": False,
+                "visualization": "bar",
+            }
+
+    # 5. Correlation
+    if re.search(r"\bcorrelat", q_lower):
+        cols = _find_two_columns(q_lower)
+        plan = {"operation": "correlation"}
+        if cols:
+            plan["columns"] = cols
+        plan["visualization"] = "heatmap"
+        return plan
+
+    # 6. Highest / Lowest / Maximum / Minimum with groupby
+    if re.search(r"\b(highest|most|largest|greatest|maximum)\b", q_lower):
+        # Check for groupby pattern
+        col = _find_column(q_lower)
+        if col:
+            # Look for another column that could be the group
+            other_cols = [
+                orig for cl, orig in cols_lower_map.items()
+                if cl in q_lower and orig != col
+            ]
+            if other_cols:
+                return {
+                    "operation": "groupby",
+                    "group_column": other_cols[0],
+                    "value_column": col,
+                    "aggregation": "sum",
+                    "sort": "descending",
+                    "limit": 1,
+                    "visualization": "bar",
+                }
+            else:
+                return {"operation": "max", "column": col}
+
+    if re.search(r"\b(lowest|least|smallest|minimum)\b", q_lower):
+        col = _find_column(q_lower)
+        if col:
+            other_cols = [
+                orig for cl, orig in cols_lower_map.items()
+                if cl in q_lower and orig != col
+            ]
+            if other_cols:
+                return {
+                    "operation": "groupby",
+                    "group_column": other_cols[0],
+                    "value_column": col,
+                    "aggregation": "sum",
+                    "sort": "ascending",
+                    "limit": 1,
+                    "visualization": "bar",
+                }
+            else:
+                return {"operation": "min", "column": col}
+
+    # 7. Count
+    if re.search(r"\b(count|how\s+many)\b", q_lower):
+        col = _find_column(q_lower)
+        if col:
+            return {"operation": "count", "column": col}
+
+    # 8. Filter
+    filter_match = re.search(
+        r"where\s+(\w+)\s*(>|<|>=|<=|==|!=)\s*([\d.]+)",
+        q_lower,
+    )
+    if filter_match:
+        col_name = filter_match.group(1)
+        matched_col = cols_lower_map.get(col_name)
+        if matched_col:
+            try:
+                value = float(filter_match.group(3))
+            except ValueError:
+                value = filter_match.group(3)
+            return {
+                "operation": "filter",
+                "column": matched_col,
+                "operator": filter_match.group(2),
+                "value": value,
+            }
+
+    # 9. Sort
+    if re.search(r"\bsort\b", q_lower):
+        col = _find_column(q_lower)
+        if col:
+            ascending = "descending" not in q_lower
+            return {
+                "operation": "sort",
+                "column": col,
+                "ascending": ascending,
+            }
+
+    # 10. Trend
+    if re.search(r"\btrend\b|\bover\s+time\b|\bchange\b|\bgrowth\b", q_lower):
+        # Try to find date and value columns
+        date_cols = []
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                date_cols.append(col)
+            else:
+                try:
+                    pd.to_datetime(df[col].dropna().head(5))
+                    date_cols.append(col)
+                except Exception:
+                    pass
+
+        value_col = _find_column(q_lower)
+        if date_cols and value_col:
+            return {
+                "operation": "trend",
+                "date_column": date_cols[0],
+                "value_column": value_col,
+                "frequency": "monthly",
+                "visualization": "line",
+            }
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# High-level analysis plan interface
+# ---------------------------------------------------------------------------
+
+def generate_analysis_plan(
+    user_question: str,
+    df: pd.DataFrame,
+    ai_response: Optional[str] = None,
+) -> Dict[str, Any]:
+    """End-to-end analysis-plan generation.
+
+    If *ai_response* is provided, it is parsed directly.
+    Otherwise, rule-based parsing is attempted first.  If no rule-based
+    match is found, the prompt is returned so an external AI model
+    can be queried.
+
+    Args:
+        user_question: The user's natural-language question.
+        df: The DataFrame to analyse.
+        ai_response: Optional raw AI model output to parse.
+
+    Returns:
+        Validated analysis plan dictionary, or a prompt dictionary.
+
+    Raises:
+        ValueError: If the plan fails validation.
+    """
+    if ai_response is not None:
+        plan = parse_analysis_response(ai_response)
+    else:
+        rule_plan = parse_analysis_request_rule_based(user_question, df)
+        if rule_plan:
+            plan = rule_plan
+        else:
+            prompt = build_analysis_prompt(user_question, df)
+            return {"prompt": prompt, "status": "awaiting_ai_response"}
+
+    # Validate the plan
+    operation = plan.get("operation")
+    if operation not in SUPPORTED_ANALYSIS_OPERATIONS:
+        raise ValueError(
+            f"Unsupported operation: '{operation}'. "
+            f"Supported: {sorted(SUPPORTED_ANALYSIS_OPERATIONS)}"
+        )
+
+    # Validate column references
+    for key in ["column", "group_column", "value_column", "date_column"]:
+        col = plan.get(key)
+        if col and col not in df.columns:
+            raise ValueError(
+                f"Column '{col}' (from '{key}') does not exist. "
+                f"Available: {list(df.columns)}"
+            )
+
+    if "columns" in plan and isinstance(plan["columns"], list):
+        for col in plan["columns"]:
+            if col not in df.columns:
+                raise ValueError(
+                    f"Column '{col}' does not exist. "
+                    f"Available: {list(df.columns)}"
+                )
+
+    return plan

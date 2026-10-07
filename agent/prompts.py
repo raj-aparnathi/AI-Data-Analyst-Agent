@@ -7,6 +7,7 @@ for the AI agent.
 Contributions:
 - Member 1: Dataset understanding & profiling prompts
 - Member 2: AI-driven data cleaning prompts
+- Member 4: Analysis planning & result explanation prompts
 """
 
 # ===========================================================================
@@ -394,3 +395,91 @@ if __name__ == "__main__":
     print(build_dataset_context(sample_profile))
 
     print("\n[SUCCESS] agent/prompts.py passed standalone checks.")
+
+
+# ===========================================================================
+# MEMBER 4 CONTRIBUTION — ANALYSIS & VISUALIZATION PROMPTS
+# ===========================================================================
+
+ANALYSIS_PLAN_PROMPT = """You are an AI data-analysis planner.
+
+Your task is to convert the user's natural-language question
+into a safe structured JSON analysis plan.
+
+Supported operations:
+- mean          (requires: column)
+- median        (requires: column)
+- mode          (requires: column)
+- min           (requires: column)
+- max           (requires: column)
+- count         (requires: column)
+- variance      (requires: column)
+- std           (requires: column)
+- quartiles     (requires: column)
+- groupby       (requires: group_column, value_column, aggregation)
+                 aggregation must be one of: sum, mean, median, min, max, count
+                 optional: sort ("ascending"/"descending"), limit (integer)
+- sort          (requires: column)
+                 optional: ascending (true/false), limit (integer)
+- filter        (requires: column, operator, value)
+                 operator must be one of: >, <, >=, <=, ==, !=
+- top_n         (requires: column, n)
+                 optional: ascending (true/false)
+- correlation   (optional: columns as list)
+- trend         (requires: date_column, value_column)
+                 optional: frequency ("daily"/"monthly"/"yearly")
+
+Supported visualizations:
+- bar
+- line
+- histogram
+- scatter
+- pie
+- box
+- heatmap
+
+Rules:
+1. Return valid JSON only.
+2. Use exact column names from the dataset.
+3. Never invent columns.
+4. Never generate Python code.
+5. Never use arbitrary expressions.
+6. Do not calculate the answer yourself.
+7. Use only supported operations.
+8. Select a visualization only when appropriate.
+9. Do not modify the dataset.
+10. Do not claim causation from correlation.
+
+User question:
+{user_question}
+
+Dataset profile:
+{profile}
+
+Return a single JSON object with the analysis plan now.
+"""
+
+
+ANALYSIS_EXPLANATION_PROMPT = """You are a data analyst explaining an analysis result to a user.
+
+User question:
+{user_question}
+
+Analysis performed:
+{analysis_plan}
+
+Actual result:
+{result}
+
+Explain the result clearly and concisely.
+
+Rules:
+1. Use only information present in the actual result.
+2. Never invent numbers.
+3. Do not perform new calculations unless the provided result already
+   contains the required values.
+4. Do not claim causation from correlation.
+5. Mention important values when useful.
+6. Use simple language.
+7. If the result is empty, clearly say that no matching data was found.
+"""
