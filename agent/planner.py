@@ -399,3 +399,279 @@ def _build_dataset_profile(df: pd.DataFrame) -> str:
     lines.append(f"Duplicate rows: {total_duplicates}")
 
     return "\n".join(lines)
+
+
+# ===========================================================================
+# MEMBER 3 CONTRIBUTION — TRANSFORMATION PLAN GENERATION
+# ===========================================================================
+
+import json as _json_m3
+import re as _re_m3
+from typing import Optional as _Optional_m3
+
+
+def build_transformation_prompt_m3(
+    user_request: str,
+    df,
+) -> str:
+    """Build the prompt for the AI transformation planner (M3).
+
+    Args:
+        user_request: Natural-language transformation instruction.
+        df: The DataFrame to be transformed.
+
+    Returns:
+        Ready-to-send prompt string.
+    """
+    from agent.prompts import build_transformation_prompt
+    return build_transformation_prompt(user_request, df)
+
+
+def parse_transformation_response(raw_response: str) -> dict:
+    """Extract a JSON transformation plan from the raw AI response.
+
+    Handles markdown code fences and stray surrounding text.
+
+    Args:
+        raw_response: Raw text returned by the AI model.
+
+    Returns:
+        Parsed transformation plan dictionary.
+
+    Raises:
+        ValueError: If the response is not valid JSON or lacks the
+                    expected structure.
+    """
+    cleaned = raw_response.strip()
+
+    fence_pattern = r"```(?:json)?\s*([\s\S]*?)\s*```"
+    fence_match = _re_m3.search(fence_pattern, cleaned)
+    if fence_match:
+        cleaned = fence_match.group(1).strip()
+
+    if not cleaned.startswith("{"):
+        brace_start = cleaned.find("{")
+        if brace_start == -1:
+            raise ValueError("AI response does not contain a JSON object.")
+        cleaned = cleaned[brace_start:]
+
+    brace_end = cleaned.rfind("}")
+    if brace_end == -1:
+        raise ValueError("AI response contains an incomplete JSON object.")
+    cleaned = cleaned[: brace_end + 1]
+
+    try:
+        plan = _json_m3.loads(cleaned)
+    except _json_m3.JSONDecodeError as exc:
+        raise ValueError(f"AI response is not valid JSON: {exc}") from exc
+
+    if not isinstance(plan, dict):
+        raise ValueError("Parsed JSON is not a dictionary.")
+    if "operations" not in plan:
+        raise ValueError("Parsed JSON does not contain an 'operations' key.")
+
+    return plan
+
+
+def parse_transformation_request_rule_based(
+    user_request: str,
+    df,
+) -> _Optional_m3[dict]:
+    """Parse common natural-language transformation instructions directly.
+
+    Covers requests such as:
+    - "Convert gender to one-hot encoding."
+    - "Label encode the city column."
+    - "Normalize salary using Min-Max."
+    - "Standardize age using Z-score."
+    - "Convert age to integer."
+    - "Rename salary to annual_salary."
+    - "Drop the customer_id column."
+    - "Create total_price from quantity and price."
+    - "Extract year from purchase_date."
+
+    Args:
+        user_request: Natural-language request text.
+        df: Input DataFrame to match column names against.
+
+    Returns:
+        Structured plan dict with 'operations' list, or None if no
+        recognized operations were identified.
+    """
+    import pandas as pd
+
+    operations = []
+    clauses = _re_m3.split(
+        r"\s*(?:;|\band\b|\bthen\b|,|\n)\s*",
+        user_request,
+        flags=_re_m3.IGNORECASE,
+    )
+    clauses = [c.strip() for c in clauses if c.strip()]
+    cols_lower_map = {col.lower(): col for col in df.columns}
+
+    for clause in clauses:
+        c = clause.lower()
+
+        # one_hot_encode
+        if _re_m3.search(
+            r"\b(one.?hot|dummy|dummies|get.?dummies)\b", c
+        ):
+            matched = _find_column(c, cols_lower_map)
+            if matched:
+                operations.append({
+                    "operation": "one_hot_encode",
+                    "column": matched,
+                })
+            continue
+
+        # label_encode
+        if _re_m3.search(r"\blabel.?encod", c):
+            matched = _find_column(c, cols_lower_map)
+            if matched:
+                operations.append({
+                    "operation": "label_encode",
+                    "column": matched,
+                })
+            continue
+
+        # min_max_normalize
+        if _re_m3.search(r"\b(min.?max|minmax)\b", c):
+            matched = _find_column(c, cols_lower_map)
+            if matched:
+                operations.append({
+                    "operation": "min_max_normalize",
+                    "column": matched,
+                })
+            continue
+
+        # z_score_normalize
+        if _re_m3.search(r"\b(z.?score|standardize|zscore)\b", c):
+            matched = _find_column(c, cols_lower_map)
+            if matched:
+                operations.append({
+                    "operation": "z_score_normalize",
+                    "column": matched,
+                })
+            continue
+
+        # drop_column
+        if _re_m3.search(
+            r"\b(drop|remove|delete)\s+(?:the\s+)?([a-z0-9_]+)\s+column\b"
+            r"|\b(drop|remove|delete)\s+column\s+([a-z0-9_]+)\b",
+            c,
+        ):
+            matched = _find_column(c, cols_lower_map)
+            if matched:
+                operations.append({
+                    "operation": "drop_column",
+                    "column": matched,
+                })
+            continue
+
+        # rename_column: "rename X to Y" or "rename X as Y"
+        rename_match = _re_m3.search(
+            r"\brename\s+([a-z0-9_]+)\s+(?:to|as)\s+([a-z0-9_]+)\b", c
+        )
+        if rename_match:
+            old_l, new_l = rename_match.group(1), rename_match.group(2)
+            old_real = cols_lower_map.get(old_l, old_l)
+            operations.append({
+                "operation": "rename_column",
+                "old_name": old_real,
+                "new_name": new_l,
+            })
+            continue
+
+        # convert_datatype: "convert X to int/float/datetime/..."
+        dtype_match = _re_m3.search(
+            r"\bconvert\s+([a-z0-9_]+)\s+to\s+(int|float|string|bool|datetime)\b",
+            c,
+        )
+        if dtype_match:
+            col_l, dtype_str = dtype_match.group(1), dtype_match.group(2)
+            real_col = cols_lower_map.get(col_l, col_l)
+            operations.append({
+                "operation": "convert_datatype",
+                "column": real_col,
+                "dtype": dtype_str,
+            })
+            continue
+
+        # extract_date_part: "extract year/month/day/dayofweek from X"
+        date_match = _re_m3.search(
+            r"\bextract\s+(year|month|day|dayofweek)\s+from\s+([a-z0-9_]+)\b",
+            c,
+        )
+        if date_match:
+            part, col_l = date_match.group(1), date_match.group(2)
+            real_col = cols_lower_map.get(col_l, col_l)
+            operations.append({
+                "operation": "extract_date_part",
+                "column": real_col,
+                "part": part,
+            })
+            continue
+
+    if operations:
+        return {"operations": operations}
+    return None
+
+
+def generate_transformation_plan(
+    user_request: str,
+    df,
+    ai_response: _Optional_m3[str] = None,
+) -> dict:
+    """End-to-end transformation-plan generation (M3).
+
+    If *ai_response* is provided it is parsed and validated directly.
+    Otherwise, rule-based parsing is attempted first; if that yields
+    operations the validated plan is returned.  If rule-based parsing
+    finds nothing, a prompt dict is returned so the caller can query
+    the AI model.
+
+    Args:
+        user_request: Natural-language transformation request.
+        df: The DataFrame to transform.
+        ai_response: Optional raw AI model output to parse.
+
+    Returns:
+        Validated transformation plan dict  OR
+        ``{"prompt": ..., "status": "awaiting_ai_response"}`` if the AI
+        needs to be called.
+
+    Raises:
+        ValueError: If the plan fails validation.
+    """
+    from operations.transformation import validate_transformation_plan
+
+    if ai_response is not None:
+        plan = parse_transformation_response(ai_response)
+    else:
+        rule_plan = parse_transformation_request_rule_based(user_request, df)
+        if rule_plan and rule_plan.get("operations"):
+            plan = rule_plan
+        else:
+            prompt = build_transformation_prompt_m3(user_request, df)
+            return {"prompt": prompt, "status": "awaiting_ai_response"}
+
+    errors = validate_transformation_plan(plan, df)
+    if errors:
+        raise ValueError(
+            "Transformation plan failed validation:\n"
+            + "\n".join(f"  * {e}" for e in errors)
+        )
+
+    return plan
+
+
+# ---------------------------------------------------------------------------
+# Private helper
+# ---------------------------------------------------------------------------
+
+def _find_column(clause_lower: str, cols_lower_map: dict) -> _Optional_m3[str]:
+    """Return the real column name whose lower-case form appears in clause."""
+    for col_l, original in cols_lower_map.items():
+        if _re_m3.search(rf"\b{_re_m3.escape(col_l)}\b", clause_lower):
+            return original
+    return None
